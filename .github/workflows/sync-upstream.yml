@@ -1,32 +1,69 @@
-name: Sync upstream
+name: Sync Fork with Upstream
 
 on:
-  workflow_dispatch:
   schedule:
-    - cron: "0 6 * * *" # daily at 06:00 UTC
-
-permissions:
-  contents: write
+    # Run daily at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:  # Allow manual trigger
 
 jobs:
   sync:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
     steps:
       - name: Checkout fork
         uses: actions/checkout@v4
         with:
+          token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
+          ref: master
 
-      - name: Add upstream
+      - name: Configure Git
         run: |
-          git remote add upstream https://github.com/openaps/AndroidAPSdocs.git
-          git fetch upstream
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Merge upstream into fork
+      - name: Add and fetch upstream
         run: |
-          git checkout master
-          git merge --no-edit upstream/master
+          git remote add upstream https://github.com/openaps/AndroidAPSdocs.git || true
+          git fetch upstream master
+
+      - name: Check for changes
+        id: check
+        run: |
+          BEHIND=$(git rev-list --count HEAD..upstream/master)
+          echo "behind=$BEHIND" >> $GITHUB_OUTPUT
+          if [ "$BEHIND" -eq 0 ]; then
+            echo "Fork is up to date"
+          else
+            echo "Fork is $BEHIND commits behind upstream"
+          fi
+
+      - name: Merge upstream changes
+        if: steps.check.outputs.behind != '0'
+        run: |
+          git merge upstream/master --no-edit || {
+            echo "::error::Merge conflict detected. Manual intervention required."
+            git merge --abort
+            exit 1
+          }
 
       - name: Push changes
+        if: steps.check.outputs.behind != '0'
         run: |
           git push origin master
+
+      - name: Create issue on failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: 'Upstream sync failed',
+              body: 'The automated upstream sync failed. Please check the [workflow run](' + context.payload.repository.html_url + '/actions/runs/' + context.runId + ') for details.\n\nThis likely means there are merge conflicts that need manual resolution.',
+              labels: ['automated', 'sync-failure']
+            })
